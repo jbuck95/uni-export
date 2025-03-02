@@ -1,4 +1,4 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, Menu, normalizePath, TFile } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, Menu, MenuItem, normalizePath, TFile, Command } from 'obsidian';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -165,7 +165,7 @@ export default class UniExport extends Plugin {
 		// Add a ribbon icon for converting current file
 		this.addRibbonIcon('file-pdf', 'Convert to PDF', async (evt) => {
 			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-			if (activeView) {
+			if (activeView && activeView.file) {
 				if (this.settings.latexTemplates.length === 0) {
 					new Notice('No templates defined. Please add a template in settings.');
 					return;
@@ -191,7 +191,7 @@ export default class UniExport extends Plugin {
 			name: 'Convert to PDF with active template',
 			checkCallback: (checking: boolean) => {
 				const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (activeView && this.settings.activeTemplateIndex >= 0) {
+				if (activeView && activeView.file && this.settings.activeTemplateIndex >= 0) {
 					if (!checking) {
 						this.convertToPdf(activeView.file, this.settings.activeTemplateIndex);
 					}
@@ -207,36 +207,69 @@ export default class UniExport extends Plugin {
 		// Add a context menu item for files in the explorer
 		this.registerEvent(
 			this.app.workspace.on('file-menu', (menu, file) => {
-				if (file instanceof TFile && file.extension === 'md') {
-					if (this.settings.latexTemplates.length > 0) {
-						const templateSubmenu = menu.addItem((item) => {
-							item
-								.setTitle('Convert to PDF with Template')
-								.setIcon('file-pdf');
-						}).getSubmenu();
-
-						// Add an option for each template
-						this.settings.latexTemplates.forEach((template, index) => {
-							templateSubmenu.addItem((item) => {
-								item
-									.setTitle(template.name)
-									.onClick(() => {
-										this.convertToPdf(file, index);
-									});
+				// Only show for markdown files
+				if (!(file instanceof TFile) || file.extension !== 'md') {
+					return;
+				}
+		
+				// If no templates, add disabled menu item
+				if (this.settings.latexTemplates.length === 0) {
+					menu.addItem((item) => {
+						item
+							.setTitle('Convert to PDF')
+							.setIcon('file-pdf')
+							.setDisabled(true)
+							.onClick(() => {
+								new Notice('Please add a template in the plugin settings first');
 							});
-						});
-					} else {
+					});
+					return;
+				}
+		
+				// If only one template, add single menu item
+				if (this.settings.latexTemplates.length === 1) {
+					menu.addItem((item) => {
+						item
+							.setTitle('Convert to PDF')
+							.setIcon('file-pdf')
+							.onClick(() => this.convertToPdf(file, 0));
+					});
+					return;
+				}
+		
+				// For multiple templates, create a submenu structure
+				menu.addItem((item) => {
+					item
+						.setTitle('Convert to PDF')
+						.setIcon('file-pdf');
+				});
+		
+				// Add submenu items in a separate section
+				if (this.settings.activeTemplateIndex >= 0) {
+					const activeTemplate = this.settings.latexTemplates[this.settings.activeTemplateIndex];
+					menu.addItem((item) => {
+						item
+							.setTitle(`${activeTemplate.name} (Default)`)
+							.setIcon('star-list')
+							.setSection('convert-pdf')
+							.onClick(() => this.convertToPdf(file, this.settings.activeTemplateIndex));
+					});
+				}
+		
+				// Add separator
+				menu.addSeparator();
+		
+				// Add other templates
+				this.settings.latexTemplates.forEach((template, index) => {
+					if (index !== this.settings.activeTemplateIndex) {
 						menu.addItem((item) => {
 							item
-								.setTitle('Convert to PDF with Pandoc')
-								.setIcon('file-pdf')
-								.setDisabled(true)
-								.onClick(() => {
-									new Notice('Please add a template in the plugin settings first');
-								});
+								.setTitle(template.name)
+								.setSection('convert-pdf')
+								.onClick(() => this.convertToPdf(file, index));
 						});
 					}
-				}
+				});
 			})
 		);
 
@@ -283,12 +316,12 @@ export default class UniExport extends Plugin {
 
 	refreshTemplateCommands() {
 		// Get all commands
-		const commands = this.app.commands.listCommands();
+		const commands = (this.app as any).commands.listCommands();
 		
 		// Find and remove our template commands
-		commands.forEach(cmd => {
-			if (cmd.id.startsWith('pandoc-pdf-plugin:template-')) {
-				this.app.commands.removeCommand(`pandoc-pdf-plugin:${cmd.id}`);
+		commands.forEach((cmd: Command) => {
+			if (cmd.id.startsWith('uni-export:template-')) {
+				(this.app as any).commands.removeCommand(cmd.id);
 			}
 		});
 
@@ -299,7 +332,7 @@ export default class UniExport extends Plugin {
 				name: `Convert to PDF with template: ${template.name}`,
 				checkCallback: (checking: boolean) => {
 					const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-					if (activeView) {
+					if (activeView && activeView.file) {
 						if (!checking) {
 							this.convertToPdf(activeView.file, index);
 						}
@@ -425,8 +458,14 @@ export default class UniExport extends Plugin {
 			const selectedTemplate = this.settings.latexTemplates[templateIndex];
 			
 			// Get the vault path and full file path
-			const vaultPath = this.app.vault.adapter.basePath;
-			const fullInputPath = path.join(vaultPath, file.path);
+			// Check if we're using a FileSystemAdapter
+			const adapter = this.app.vault.adapter;
+			if (!('getBasePath' in adapter)) {
+				new Notice('This plugin only works with a local vault');
+				return;
+			}
+			const vaultPath = (adapter as any).getBasePath();
+			const fullInputPath = path.join(vaultPath, normalizePath(file.path));
 			
 			// Read the markdown file and extract frontmatter
 			const content = await this.app.vault.read(file);
@@ -534,140 +573,145 @@ export default class UniExport extends Plugin {
 	}
 }
 
-class UniExportSettingsTab extends PluginSettingTab {
-	plugin: UniExport;
-	templateContainerEl: HTMLElement;
+export class UniExportSettingsTab extends PluginSettingTab {
+    plugin: UniExport;
+    templateContainerEl: HTMLElement;
 
-	constructor(app: App, plugin: UniExport) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
+    constructor(app: App, plugin: UniExport) {
+        super(app, plugin);
+        this.plugin = plugin;
+    }
 
-	display(): void {
-		const {containerEl} = this;
+    display(): void {
+        const { containerEl } = this;
 
-		containerEl.empty();
+        // Clear any existing content
+        containerEl.empty();
 
-		containerEl.createEl('h2', {text: 'Pandoc PDF Converter Settings'});
+        // Add a heading
+        containerEl.createEl('h2', { text: 'Pandoc PDF Converter Settings' });
 
-		// Pandoc Path
-		new Setting(containerEl)
-			.setName('Pandoc Path')
-			.setDesc('Path to the pandoc executable. Default is just "pandoc" which works if pandoc is in your PATH.')
-			.addText(text => text
-				.setPlaceholder('pandoc')
-				.setValue(this.plugin.settings.pandocPath)
-				.onChange(async (value) => {
-					this.plugin.settings.pandocPath = value;
-					await this.plugin.saveSettings();
-				}));
+        // Example setting: Pandoc Path
+        new Setting(containerEl)
+            .setName('Pandoc Path')
+            .setDesc('Path to the pandoc executable. Default is just "pandoc" which works if pandoc is in your PATH.')
+            .addText(text => text
+                .setPlaceholder('pandoc')
+                .setValue(this.plugin.settings.pandocPath)
+                .onChange(async (value) => {
+                    this.plugin.settings.pandocPath = value;
+                    await this.plugin.saveSettings();
+                }));
 
-		// LaTeX Templates Section
-		containerEl.createEl('h3', {text: 'LaTeX Templates'});
-		
-		this.templateContainerEl = containerEl.createDiv();
-		this.refreshTemplatesUI();
-		
-		// Add new template button
-		new Setting(containerEl)
-			.setName('Add Template')
-			.setDesc('Add a new LaTeX template')
-			.addButton(button => button
-				.setButtonText('Add Template')
-				.setCta()
-				.onClick(() => {
-					this.plugin.settings.latexTemplates.push({
-						name: 'New Template',
-						path: ''
-					});
-					this.plugin.saveSettings().then(() => {
-						this.refreshTemplatesUI();
-					});
-				}));
+        // Add more settings here...
+        // For example, you can add settings for LaTeX templates, output directory, etc.
 
-		// Output Directory
-		new Setting(containerEl)
-			.setName('Output Directory')
-			.setDesc('Directory to save PDFs (relative to vault root). Leave empty to save alongside the markdown file.')
-			.addText(text => text
-				.setPlaceholder('PDFs')
-				.setValue(this.plugin.settings.outputDirectory)
-				.onChange(async (value) => {
-					this.plugin.settings.outputDirectory = value;
-					await this.plugin.saveSettings();
-				}));
-				
-		// Images Directory
-		new Setting(containerEl)
-			.setName('Images Directory')
-			.setDesc('Directory containing images used in your documents (relative to vault root). Leave empty to use automatic detection.')
-			.addText(text => text
-				.setPlaceholder('images')
-				.setValue(this.plugin.settings.imagesDirectory)
-				.onChange(async (value) => {
-					this.plugin.settings.imagesDirectory = value;
-					await this.plugin.saveSettings();
-				}));
-				
-		// Use Template Directory
-		new Setting(containerEl)
-			.setName('Use Template Directory')
-			.setDesc('Automatically use the template directory as a resource path for images and other assets')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.useTemplateDirectoryAsResourcePath)
-				.onChange(async (value) => {
-					this.plugin.settings.useTemplateDirectoryAsResourcePath = value;
-					await this.plugin.saveSettings();
-				}));
+        // LaTeX Templates Section
+        containerEl.createEl('h3', { text: 'LaTeX Templates' });
 
-		// Additional Pandoc Arguments
-		new Setting(containerEl)
-			.setName('Additional Pandoc Arguments')
-			.setDesc('Additional command-line arguments to pass to pandoc')
-			.addText(text => text
-				.setPlaceholder('--toc -V geometry:margin=1in')
-				.setValue(this.plugin.settings.additionalPandocArgs)
-				.onChange(async (value) => {
-					this.plugin.settings.additionalPandocArgs = value;
-					await this.plugin.saveSettings();
-				}));
+        this.templateContainerEl = containerEl.createDiv();
+        this.refreshTemplatesUI();
 
-		// Images and Resource Paths Information Section
-		containerEl.createEl('h3', {text: 'Image Path Information'});
-		
-		const imageInfoEl = containerEl.createEl('div', {
-			cls: 'image-info-container',
-		});
-		
-		imageInfoEl.createEl('p', {
-			text: 'To include images in your PDFs, you have several options:'
-		});
-		
-		imageInfoEl.createEl('ul', {}).innerHTML = `
-			<li><strong>Images Directory</strong>: Set a specific directory for images above</li>
-			<li><strong>Template Directory</strong>: Enable the option to use the template directory for images</li>
-			<li><strong>Document Location</strong>: Images next to your markdown file will be found automatically</li>
-			<li><strong>Vault Root</strong>: Images in the root of your vault will be found automatically</li>
-		`;
-		
-		imageInfoEl.createEl('p', {
-			text: 'If you still have issues with images, you can check the error console to see the full pandoc command.'
-		});
-				
-		// YAML Frontmatter Information Section
-		containerEl.createEl('h3', {text: 'YAML Frontmatter Information'});
-		
-		const yamlInfoEl = containerEl.createEl('div', {
-			cls: 'yaml-info-container',
-		});
-		
-		yamlInfoEl.createEl('p', {
-			text: 'This plugin supports YAML frontmatter variables that will be passed to your LaTeX template. Example frontmatter:'
-		});
-		
-		const yamlExample = yamlInfoEl.createEl('pre', {
-			cls: 'yaml-example',
-			text: `---
+        // Add new template button
+        new Setting(containerEl)
+            .setName('Add Template')
+            .setDesc('Add a new LaTeX template')
+            .addButton(button => button
+                .setButtonText('Add Template')
+                .setCta()
+                .onClick(() => {
+                    this.plugin.settings.latexTemplates.push({
+                        name: 'New Template',
+                        path: ''
+                    });
+                    this.plugin.saveSettings().then(() => {
+                        this.refreshTemplatesUI();
+                    });
+                }));
+
+        // Output Directory
+        new Setting(containerEl)
+            .setName('Output Directory')
+            .setDesc('Directory to save PDFs (relative to vault root). Leave empty to save alongside the markdown file.')
+            .addText(text => text
+                .setPlaceholder('PDFs')
+                .setValue(this.plugin.settings.outputDirectory)
+                .onChange(async (value) => {
+                    this.plugin.settings.outputDirectory = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // Images Directory
+        new Setting(containerEl)
+            .setName('Images Directory')
+            .setDesc('Directory containing images used in your documents (relative to vault root). Leave empty to use automatic detection.')
+            .addText(text => text
+                .setPlaceholder('images')
+                .setValue(this.plugin.settings.imagesDirectory)
+                .onChange(async (value) => {
+                    this.plugin.settings.imagesDirectory = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // Use Template Directory
+        new Setting(containerEl)
+            .setName('Use Template Directory')
+            .setDesc('Automatically use the template directory as a resource path for images and other assets')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.useTemplateDirectoryAsResourcePath)
+                .onChange(async (value) => {
+                    this.plugin.settings.useTemplateDirectoryAsResourcePath = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // Additional Pandoc Arguments
+        new Setting(containerEl)
+            .setName('Additional Pandoc Arguments')
+            .setDesc('Additional command-line arguments to pass to pandoc')
+            .addText(text => text
+                .setPlaceholder('--toc -V geometry:margin=1in')
+                .setValue(this.plugin.settings.additionalPandocArgs)
+                .onChange(async (value) => {
+                    this.plugin.settings.additionalPandocArgs = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // Images and Resource Paths Information Section
+        containerEl.createEl('h3', { text: 'Image Path Information' });
+
+        const imageInfoEl = containerEl.createEl('div', {
+            cls: 'image-info-container',
+        });
+
+        imageInfoEl.createEl('p', {
+            text: 'To include images in your PDFs, you have several options:'
+        });
+
+        imageInfoEl.createEl('ul', {}).innerHTML = `
+            <li><strong>Images Directory</strong>: Set a specific directory for images above</li>
+            <li><strong>Template Directory</strong>: Enable the option to use the template directory for images</li>
+            <li><strong>Document Location</strong>: Images next to your markdown file will be found automatically</li>
+            <li><strong>Vault Root</strong>: Images in the root of your vault will be found automatically</li>
+        `;
+
+        imageInfoEl.createEl('p', {
+            text: 'If you still have issues with images, you can check the error console to see the full pandoc command.'
+        });
+
+        // YAML Frontmatter Information Section
+        containerEl.createEl('h3', { text: 'YAML Frontmatter Information' });
+
+        const yamlInfoEl = containerEl.createEl('div', {
+            cls: 'yaml-info-container',
+        });
+
+        yamlInfoEl.createEl('p', {
+            text: 'This plugin supports YAML frontmatter variables that will be passed to your LaTeX template. Example frontmatter:'
+        });
+
+        const yamlExample = yamlInfoEl.createEl('pre', {
+            cls: 'yaml-example',
+            text: `---
 title: "Titel der Hausarbeit"
 subtitle: "Untertitel, falls nötig"
 kurztitel: "Hausarbeit"
@@ -684,23 +728,23 @@ modul: "XY"
 pruefungsnr: "XY"
 abgabedatum: "1. März 2025"
 ---`
-		});
-		
-		yamlInfoEl.createEl('p', {
-			text: 'These variables will be available in your LaTeX template as $variable$ placeholders.'
-		});
-	}
+        });
 
-	refreshTemplatesUI() {
+        yamlInfoEl.createEl('p', {
+            text: 'These variables will be available in your LaTeX template as $variable$ placeholders.'
+        });
+    }
+
+    refreshTemplatesUI() {
 		this.templateContainerEl.empty();
-		
+	
 		if (this.plugin.settings.latexTemplates.length === 0) {
 			this.templateContainerEl.createEl('p', {
 				text: 'No templates defined. Add a template to get started.'
 			});
 			return;
 		}
-		
+	
 		// For each template, create settings
 		this.plugin.settings.latexTemplates.forEach((template, index) => {
 			const templateSetting = new Setting(this.templateContainerEl)
@@ -730,7 +774,7 @@ abgabedatum: "1. März 2025"
 						} else if (this.plugin.settings.activeTemplateIndex > index) {
 							this.plugin.settings.activeTemplateIndex--;
 						}
-						
+	
 						this.plugin.settings.latexTemplates.splice(index, 1);
 						await this.plugin.saveSettings();
 						this.refreshTemplatesUI();
@@ -745,14 +789,18 @@ abgabedatum: "1. März 2025"
 							this.refreshTemplatesUI();
 							new Notice(`Default template set to: ${template.name}`);
 						});
-						
+	
 					// Highlight the active template
 					if (this.plugin.settings.activeTemplateIndex === index) {
-						templateSetting.controlEl.addClass('active-template');
 						button.extraSettingsEl.addClass('active-template-button');
 					}
 				});
-				
+	
+			// Move the if block outside the callback
+			if (this.plugin.settings.activeTemplateIndex === index) {
+				templateSetting.controlEl.addClass('active-template');
+			}
+	
 			// Add file browser button
 			templateSetting.addExtraButton((button) => {
 				button
@@ -767,7 +815,7 @@ abgabedatum: "1. März 2025"
 						modal.open();
 					});
 			});
-			
+	
 			// Add visual indicator for default template
 			if (this.plugin.settings.activeTemplateIndex === index) {
 				templateSetting.nameEl.createSpan({

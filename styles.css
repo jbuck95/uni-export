@@ -6,3 +6,5 @@ available in the app when your plugin is enabled.
 If your plugin does not need CSS, delete this file.
 
 */
+containerEl.style.overflowY = 'auto';
+containerEl.style.maxHeight = 'calc(100vh - 200px)'; // Adjust as needed

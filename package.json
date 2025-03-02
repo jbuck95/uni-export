@@ -1,7 +1,7 @@
 {
 	"name": "uni-export",
 	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"description": "easy MD to PDF via pandoc",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",

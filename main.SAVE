@@ -17,10 +17,10 @@ interface UniExportSetting {
 	latexTemplates: LatexTemplate[];
 	activeTemplateIndex: number;
 	outputDirectory: string;
-	imagesDirectory: string; // Neues Feld für Bild-Verzeichnis
+	imagesDirectory: string;
 	pandocPath: string;
 	additionalPandocArgs: string;
-	useTemplateDirectoryAsResourcePath: boolean; // Neues Flag für automatische Verwendung des Template-Verzeichnisses
+	useTemplateDirectoryAsResourcePath: boolean;
 }
 
 const DEFAULT_SETTINGS: UniExportSetting = {
@@ -33,8 +33,131 @@ const DEFAULT_SETTINGS: UniExportSetting = {
 	useTemplateDirectoryAsResourcePath: true
 }
 
+// File suggestion modal for template selection
+class FileSuggestModal extends Modal {
+	files: string[] = [];
+	suggestEl: HTMLElement;
+	inputEl: HTMLInputElement;
+	onChoose: (result: string) => void;
+	
+	constructor(app: App, onChoose: (result: string) => void) {
+		super(app);
+		this.onChoose = onChoose;
+	}
+	
+	onOpen() {
+		const { contentEl } = this;
+		
+		contentEl.createEl('h2', { text: 'Select Template File' });
+		
+		// Create an input for manual path entry
+		this.inputEl = contentEl.createEl('input', {
+			type: 'text',
+			placeholder: 'Enter path or start typing to search',
+			cls: 'template-file-input'
+		});
+		this.inputEl.style.width = '100%';
+		this.inputEl.style.marginBottom = '15px';
+		
+		// Create a suggestions container
+		this.suggestEl = contentEl.createDiv({ cls: 'template-file-suggestions' });
+		this.suggestEl.style.maxHeight = '300px';
+		this.suggestEl.style.overflowY = 'auto';
+		
+		// Find all .tex files in the vault
+		this.searchFiles();
+		
+		// Add event listener for input
+		this.inputEl.addEventListener('input', () => {
+			this.filterFiles(this.inputEl.value);
+		});
+		
+		// Focus the input
+		this.inputEl.focus();
+		
+		// Add confirm button
+		const confirmBtn = contentEl.createEl('button', { text: 'Confirm', cls: 'mod-cta' });
+		confirmBtn.style.marginTop = '15px';
+		confirmBtn.addEventListener('click', () => {
+			this.close();
+			this.onChoose(this.inputEl.value);
+		});
+	}
+	
+	async searchFiles() {
+		this.files = [];
+		
+		// Search all .tex files in the vault
+		const files = this.app.vault.getFiles();
+		for (const file of files) {
+			if (file.extension === 'tex') {
+				this.files.push(file.path);
+			}
+		}
+		
+		this.renderSuggestions();
+	}
+	
+	filterFiles(query: string) {
+		if (!query) {
+			this.renderSuggestions();
+			return;
+		}
+		
+		const lowerQuery = query.toLowerCase();
+		const filteredFiles = this.files.filter(file => 
+			file.toLowerCase().includes(lowerQuery)
+		);
+		
+		this.renderSuggestions(filteredFiles);
+	}
+	
+	renderSuggestions(filesToRender = this.files) {
+		this.suggestEl.empty();
+		
+		if (filesToRender.length === 0) {
+			this.suggestEl.createEl('div', { 
+				text: 'No .tex files found. You can still enter a path manually.',
+				cls: 'template-file-empty'
+			});
+			return;
+		}
+		
+		for (const file of filesToRender) {
+			const fileEl = this.suggestEl.createEl('div', { 
+				text: file,
+				cls: 'template-file-item'
+			});
+			
+			fileEl.style.padding = '5px';
+			fileEl.style.cursor = 'pointer';
+			fileEl.style.borderRadius = '4px';
+			
+			fileEl.addEventListener('mouseover', () => {
+				fileEl.style.backgroundColor = 'var(--background-secondary)';
+			});
+			
+			fileEl.addEventListener('mouseout', () => {
+				fileEl.style.backgroundColor = '';
+			});
+			
+			fileEl.addEventListener('click', () => {
+				this.inputEl.value = file;
+				this.close();
+				this.onChoose(file);
+			});
+		}
+	}
+	
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+}
+
 export default class UniExport extends Plugin {
 	settings: UniExportSetting;
+	styleEl: HTMLStyleElement | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -119,16 +242,55 @@ export default class UniExport extends Plugin {
 
 		// Add a settings tab
 		this.addSettingTab(new UniExportSettingsTab(this.app, this));
+		
+		// Add CSS for styling
+		this.addStyles();
+	}
+	
+	addStyles() {
+		// Create style element once to avoid multiple injections
+		if (!this.styleEl) {
+			this.styleEl = document.createElement('style');
+			this.styleEl.id = 'uni-export-styles';
+			document.head.appendChild(this.styleEl);
+		}
+		
+		this.styleEl.textContent = `
+			.default-template {
+				background-color: var(--background-secondary);
+				border-left: 3px solid var(--interactive-accent);
+				padding-left: 8px;
+				border-radius: 4px;
+			}
+			.default-template-indicator {
+				color: var(--text-accent);
+				font-style: italic;
+			}
+			.yaml-example {
+				background-color: var(--background-secondary);
+				padding: 10px;
+				border-radius: 4px;
+				overflow-x: auto;
+			}
+			.image-info-container ul {
+				margin-left: 20px;
+			}
+			.template-file-item:hover {
+				background-color: var(--background-secondary);
+			}
+		`;
 	}
 
 	refreshTemplateCommands() {
-		// Remove old commands
-		this.app.commands.listCommands()
-			.filter(cmd => cmd.id.startsWith('pandoc-pdf-plugin:template-'))
-			.forEach(cmd => {
-				// @ts-ignore - removeCommand exists but is not in the type definitions
-				this.app.commands.removeCommand(cmd.id);
-			});
+		// Get all commands
+		const commands = this.app.commands.listCommands();
+		
+		// Find and remove our template commands
+		commands.forEach(cmd => {
+			if (cmd.id.startsWith('pandoc-pdf-plugin:template-')) {
+				this.app.commands.removeCommand(`pandoc-pdf-plugin:${cmd.id}`);
+			}
+		});
 
 		// Add new commands for each template
 		this.settings.latexTemplates.forEach((template, index) => {
@@ -209,7 +371,10 @@ export default class UniExport extends Plugin {
 	}
 
 	onunload() {
-		// Nothing special to clean up
+		// Clean up styles
+		if (this.styleEl && this.styleEl.parentNode) {
+			this.styleEl.parentNode.removeChild(this.styleEl);
+		}
 	}
 
 	async loadSettings() {
@@ -231,6 +396,7 @@ export default class UniExport extends Plugin {
 				return yaml.load(match[1]) as Record<string, any>;
 			} catch (e) {
 				console.error("Error parsing YAML frontmatter:", e);
+				new Notice("Error parsing YAML frontmatter in document");
 			}
 		}
 		
@@ -290,6 +456,13 @@ export default class UniExport extends Plugin {
 			
 			// Add template
 			const templatePath = path.join(vaultPath, selectedTemplate.path);
+			
+			// Check if template exists
+			if (!fs.existsSync(templatePath)) {
+				new Notice(`Template file not found: ${templatePath}`);
+				return;
+			}
+			
 			command += ` --template="${templatePath}"`;
 			
 			// Add PDF engine
@@ -301,13 +474,17 @@ export default class UniExport extends Plugin {
 			// 1. Add images directory if specified
 			if (this.settings.imagesDirectory) {
 				const imagesDirPath = path.join(vaultPath, this.settings.imagesDirectory);
-				resourcePaths.push(imagesDirPath);
+				if (fs.existsSync(imagesDirPath)) {
+					resourcePaths.push(imagesDirPath);
+				}
 			}
 			
 			// 2. Add template directory as resource path if option is enabled
 			if (this.settings.useTemplateDirectoryAsResourcePath) {
 				const templateDir = path.dirname(templatePath);
-				resourcePaths.push(templateDir);
+				if (fs.existsSync(templateDir)) {
+					resourcePaths.push(templateDir);
+				}
 			}
 			
 			// 3. Add current file directory to resource paths
@@ -320,7 +497,10 @@ export default class UniExport extends Plugin {
 			// Add resource paths to pandoc command
 			if (resourcePaths.length > 0) {
 				const uniquePaths = Array.from(new Set(resourcePaths)); // Remove duplicates
-				command += ` --resource-path="${uniquePaths.join(':')}"`;
+				
+				// Use appropriate path separator based on OS
+				const separator = os.platform() === 'win32' ? ';' : ':';
+				command += ` --resource-path="${uniquePaths.join(separator)}"`;
 			}
 			
 			// Add any additional arguments
@@ -597,154 +777,5 @@ abgabedatum: "1. März 2025"
 				templateSetting.settingEl.addClass('default-template');
 			}
 		});
-		
-		// Add CSS for styling the default template
-		const css = `
-			.default-template {
-				background-color: var(--background-secondary);
-				border-left: 3px solid var(--interactive-accent);
-				padding-left: 8px;
-				border-radius: 4px;
-			}
-			.default-template-indicator {
-				color: var(--text-accent);
-				font-style: italic;
-			}
-			.yaml-example {
-				background-color: var(--background-secondary);
-				padding: 10px;
-				border-radius: 4px;
-				overflow-x: auto;
-			}
-			.image-info-container ul {
-				margin-left: 20px;
-			}
-		`;
-		
-		// Add the CSS to the page
-		const styleEl = document.createElement('style');
-		styleEl.textContent = css;
-		document.head.appendChild(styleEl);
-	}
-}
-
-class FileSuggestModal extends Modal {
-	files: string[] = [];
-	suggestEl: HTMLElement;
-	inputEl: HTMLInputElement;
-	onChoose: (result: string) => void;
-	
-	constructor(app: App, onChoose: (result: string) => void) {
-		super(app);
-		this.onChoose = onChoose;
-	}
-	
-	onOpen() {
-		const { contentEl } = this;
-		
-		contentEl.createEl('h2', { text: 'Select Template File' });
-		
-		// Create an input for manual path entry
-		this.inputEl = contentEl.createEl('input', {
-			type: 'text',
-			placeholder: 'Enter path or start typing to search',
-			cls: 'template-file-input'
-		});
-		this.inputEl.style.width = '100%';
-		this.inputEl.style.marginBottom = '15px';
-		
-		// Create a suggestions container
-		this.suggestEl = contentEl.createDiv({ cls: 'template-file-suggestions' });
-		this.suggestEl.style.maxHeight = '300px';
-		this.suggestEl.style.overflowY = 'auto';
-		
-		// Find all .tex files in the vault
-		this.searchFiles();
-		
-		// Add event listener for input
-		this.inputEl.addEventListener('input', () => {
-			this.filterFiles(this.inputEl.value);
-		});
-		
-		// Focus the input
-		this.inputEl.focus();
-		
-		// Add confirm button
-		const confirmBtn = contentEl.createEl('button', { text: 'Confirm', cls: 'mod-cta' });
-		confirmBtn.style.marginTop = '15px';
-		confirmBtn.addEventListener('click', () => {
-			this.close();
-			this.onChoose(this.inputEl.value);
-		});
-	}
-	
-	async searchFiles() {
-		this.files = [];
-		
-		// Search all .tex files in the vault
-		const files = this.app.vault.getFiles();
-		for (const file of files) {
-			if (file.extension === 'tex') {
-				this.files.push(file.path);
-			}
-		}
-		
-		this.renderSuggestions();
-	}
-	
-	filterFiles(query: string) {
-		if (!query) {
-			this.renderSuggestions();
-			return;
-		}
-		
-		const lowerQuery = query.toLowerCase();
-		const filteredFiles = this.files.filter(file => 
-			file.toLowerCase().includes(lowerQuery)
-		);
-		
-		this.renderSuggestions(filteredFiles);
-	}
-	
-	renderSuggestions(filesToRender = this.files) {
-		this.suggestEl.empty();
-		
-		if (filesToRender.length === 0) {
-			this.suggestEl.createEl('div', { 
-				text: 'No .tex files found. You can still enter a path manually.',
-				cls: 'template-file-empty'
-			});
-			return;
-		}
-		
-		for (const file of filesToRender) {
-			const fileEl = this.suggestEl.createEl('div', { 
-				text: file,
-				cls: 'template-file-item'
-			});
-			
-			fileEl.style.padding = '5px';
-			fileEl.style.cursor = 'pointer';
-			fileEl.style.borderRadius = '4px';
-			
-			fileEl.addEventListener('mouseover', () => {
-				fileEl.style.backgroundColor = 'var(--background-secondary)';
-			});
-			
-			fileEl.addEventListener('mouseout', () => {
-				fileEl.style.backgroundColor = '';
-			});
-			
-			fileEl.addEventListener('click', () => {
-				this.inputEl.value = file;
-				this.close();
-				this.onChoose(file);
-			});
-		}
-	}
-	
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
 	}
 }
