@@ -454,9 +454,9 @@ export default class UniExport extends Plugin {
 				new Notice('Invalid template selection');
 				return;
 			}
-			
+	
 			const selectedTemplate = this.settings.latexTemplates[templateIndex];
-			
+	
 			// Get the vault path and full file path
 			// Check if we're using a FileSystemAdapter
 			const adapter = this.app.vault.adapter;
@@ -466,93 +466,97 @@ export default class UniExport extends Plugin {
 			}
 			const vaultPath = (adapter as any).getBasePath();
 			const fullInputPath = path.join(vaultPath, normalizePath(file.path));
-			
+	
 			// Read the markdown file and extract frontmatter
 			const content = await this.app.vault.read(file);
 			const frontmatter = this.extractFrontmatter(content);
-			
+	
 			// Create a temporary metadata file with the YAML frontmatter
 			const metadataPath = await this.createMetadataFile(frontmatter);
-			
+	
 			// Determine output path
 			let outputPath = fullInputPath.replace(/\.md$/, '.pdf');
 			if (this.settings.outputDirectory) {
 				const fileName = path.basename(outputPath);
 				outputPath = path.join(vaultPath, this.settings.outputDirectory, fileName);
-				
+	
 				// Ensure output directory exists
 				const outputDir = path.dirname(outputPath);
 				if (!fs.existsSync(outputDir)) {
 					fs.mkdirSync(outputDir, { recursive: true });
 				}
 			}
-			
+	
+			// Normalize paths to use forward slashes
+			const normalizePathForPandoc = (p: string) => p.replace(/\\/g, '/');
+	
 			// Build pandoc command
-			let command = `"${this.settings.pandocPath}" "${fullInputPath}" -o "${outputPath}"`;
-			
+			let command = `"${this.settings.pandocPath}" "${normalizePathForPandoc(fullInputPath)}" -o "${normalizePathForPandoc(outputPath)}"`;
+	
 			// Add metadata file
-			command += ` --metadata-file="${metadataPath}"`;
-			
+			command += ` --metadata-file="${normalizePathForPandoc(metadataPath)}"`;
+	
 			// Add template
 			const templatePath = path.join(vaultPath, selectedTemplate.path);
-			
+	
 			// Check if template exists
 			if (!fs.existsSync(templatePath)) {
-				new Notice(`Template file not found: ${templatePath}`);
+				new Notice(`Template file not found: ${selectedTemplate.path}`);
 				return;
 			}
-			
-			command += ` --template="${templatePath}"`;
-			
+	
+			command += ` --template="${normalizePathForPandoc(templatePath)}"`;
+	
 			// Add PDF engine
 			command += ` --pdf-engine=xelatex`;
-
-			// Add resource paths for images
-			let resourcePaths = [];
-			
-			// 1. Add images directory if specified
-			if (this.settings.imagesDirectory) {
-				const imagesDirPath = path.join(vaultPath, this.settings.imagesDirectory);
-				if (fs.existsSync(imagesDirPath)) {
-					resourcePaths.push(imagesDirPath);
+	
+			// COMPLETELY REFACTORED RESOURCE PATH HANDLING
+			// Only use the specified images directory if it exists
+			if (this.settings.imagesDirectory && this.settings.imagesDirectory.trim() !== '') {
+				// Handle both absolute and relative paths
+				let imagesDirPath;
+				if (path.isAbsolute(this.settings.imagesDirectory)) {
+					imagesDirPath = this.settings.imagesDirectory;
+				} else {
+					imagesDirPath = path.join(vaultPath, this.settings.imagesDirectory);
 				}
-			}
-			
-			// 2. Add template directory as resource path if option is enabled
-			if (this.settings.useTemplateDirectoryAsResourcePath) {
-				const templateDir = path.dirname(templatePath);
-				if (fs.existsSync(templateDir)) {
-					resourcePaths.push(templateDir);
-				}
-			}
-			
-			// 3. Add current file directory to resource paths
-			const currentFileDir = path.dirname(fullInputPath);
-			resourcePaths.push(currentFileDir);
-			
-			// 4. Add vault root to resource paths
-			resourcePaths.push(vaultPath);
-			
-			// Add resource paths to pandoc command
-			if (resourcePaths.length > 0) {
-				const uniquePaths = Array.from(new Set(resourcePaths)); // Remove duplicates
 				
-				// Use appropriate path separator based on OS
-				const separator = os.platform() === 'win32' ? ';' : ':';
-				command += ` --resource-path="${uniquePaths.join(separator)}"`;
+				if (fs.existsSync(imagesDirPath)) {
+					command += ` --resource-path="${normalizePathForPandoc(imagesDirPath)}"`;
+					console.log(`Using images directory: ${imagesDirPath}`);
+				} else {
+					console.warn(`Images directory not found: ${this.settings.imagesDirectory}`);
+					// Fallback to current file directory
+					command += ` --resource-path="${normalizePathForPandoc(path.dirname(fullInputPath))}"`;
+					console.log(`Falling back to current file directory: ${path.dirname(fullInputPath)}`);
+				}
+			} else if (this.settings.useTemplateDirectoryAsResourcePath) {
+				// If no images directory specified but template directory is enabled, use that
+				const templateDir = path.dirname(templatePath);
+				command += ` --resource-path="${normalizePathForPandoc(templateDir)}"`;
+				console.log(`Using template directory: ${templateDir}`);
+			} else {
+				// If nothing else is specified, use current file directory
+				command += ` --resource-path="${normalizePathForPandoc(path.dirname(fullInputPath))}"`;
+				console.log(`Using current file directory: ${path.dirname(fullInputPath)}`);
 			}
-			
-			// Add any additional arguments
-			if (this.settings.additionalPandocArgs) {
+	
+			// Add extract-media option to have pandoc extract embedded images
+			command += ` --extract-media="${normalizePathForPandoc(path.dirname(outputPath))}"`;
+	
+			// Add additional pandoc arguments if specified
+			if (this.settings.additionalPandocArgs && this.settings.additionalPandocArgs.trim() !== '') {
 				command += ` ${this.settings.additionalPandocArgs}`;
 			}
-			
+	
 			new Notice(`Converting to PDF using template: ${selectedTemplate.name}...`);
-			
+	
+			console.log("Running pandoc command:", command);
+	
 			try {
 				await execPromise(command);
-				new Notice(`PDF created at ${outputPath}`);
-				
+				new Notice(`PDF created at ${this.settings.outputDirectory ? `${this.settings.outputDirectory}/${path.basename(outputPath)}` : file.path.replace(/\.md$/, '.pdf')}`);
+	
 				// Clean up the temporary metadata file
 				try {
 					fs.unlinkSync(metadataPath);
@@ -560,12 +564,13 @@ export default class UniExport extends Plugin {
 					console.warn("Could not delete temporary metadata file:", e);
 				}
 			} catch (error) {
-				// Show more detailed error with command for debugging
 				console.error("Pandoc command that failed:", command);
 				console.error("Pandoc error:", error);
+				
+				// Show full error for debugging
 				new Notice(`Error converting to PDF: ${error.message}`);
 			}
-			
+	
 		} catch (error) {
 			console.error('Error converting to PDF:', error);
 			new Notice(`Error converting to PDF: ${error.message}`);
