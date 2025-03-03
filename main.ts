@@ -87,10 +87,13 @@ class FileSuggestModal extends Modal {
 	async searchFiles() {
 		this.files = [];
 		
-		// Search all .tex files in the vault
+		// Define valid LaTeX file extensions
+		const latexExtensions = ['tex', 'latex', 'ltx'];
+		
+		// Search all LaTeX files in the vault
 		const files = this.app.vault.getFiles();
 		for (const file of files) {
-			if (file.extension === 'tex') {
+			if (latexExtensions.includes(file.extension.toLowerCase())) {
 				this.files.push(file.path);
 			}
 		}
